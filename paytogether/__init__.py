@@ -1,0 +1,1 @@
+"""PayTogether Telegram bot package."""

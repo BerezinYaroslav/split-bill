@@ -1,0 +1,4 @@
+python-telegram-bot==21.10
+pytesseract==0.3.13
+Pillow==11.1.0
+openai==1.68.2
