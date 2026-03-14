@@ -17,6 +17,12 @@ from telegram.ext import (
 )
 
 from .ai_extractor import AIReceiptError, PROMPT, extract_receipt_with_ai, extract_receipt_with_ai_prompt
+from .feedback import (
+    FeedbackStorageError,
+    append_feedback_row,
+    feedback_storage_enabled,
+    has_feedback_for_user,
+)
 from .parser import serialize_receipt
 from .splitter import add_shared_amount, assign_item, calculate_allocations, render_allocations
 from .state import SessionStore
@@ -38,7 +44,7 @@ Make sure the sum of item totals minus discounts matches subtotal or final total
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.reset(update.effective_chat.id)
     await update.message.reply_text(
-        "Пожалуйста, пришлите фотографию чека. Я распознаю её через OpenAI API и затем помогу распределить позиции."
+        "Пожалуйста, пришлите фотографию чека. Я распознаю её через OpenAI API и затем помогу распределить позиции"
     )
 
 
@@ -54,7 +60,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.reset(update.effective_chat.id)
-    await update.message.reply_text("Сессия очищена. Пожалуйста, пришлите новый чек.")
+    await update.message.reply_text("Сессия очищена. Пожалуйста, пришлите новый чек")
 
 
 async def set_people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -77,7 +83,7 @@ async def set_people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     if not session.receipt:
-        await update.message.reply_text("Сначала, пожалуйста, пришлите фотографию чека.")
+        await update.message.reply_text("Сначала, пожалуйста, пришлите фотографию чека")
         return
 
     allocations = build_session_allocations(session)
@@ -87,7 +93,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     if not session.raw_ocr_text:
-        await update.message.reply_text("Сырого JSON распознавания пока нет. Сначала, пожалуйста, пришлите фотографию чека.")
+        await update.message.reply_text("Сырого JSON распознавания пока нет. Сначала, пожалуйста, пришлите фотографию чека")
         return
 
     chunks = [
@@ -106,7 +112,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     session.tip_amount = Decimal("0")
     session.tip_participants = []
     session.awaiting_tip_amount = False
-    await update.message.reply_text("Фотография получена, чек обрабатывается. Пожалуйста, подождите.")
+    session.awaiting_feedback = False
+    await update.message.reply_text("Фотография получена, чек обрабатывается. Пожалуйста, подождите")
 
     try:
         telegram_file = await photo.get_file(
@@ -125,23 +132,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         session.raw_ocr_text = raw_text
     except TimedOut:
         await update.message.reply_text(
-            "Telegram слишком долго передавал файл. Пожалуйста, отправьте фотографию ещё раз или используйте изображение меньшего размера."
+            "Telegram слишком долго передавал файл. Пожалуйста, отправьте фотографию ещё раз или используйте изображение меньшего размера"
         )
         return
     except NetworkError:
         await update.message.reply_text(
-            "Не удалось скачать фотографию из Telegram из-за сетевой ошибки. Пожалуйста, повторите попытку через несколько секунд и отправьте фотографию ещё раз."
+            "Не удалось скачать фотографию из Telegram из-за сетевой ошибки. Пожалуйста, повторите попытку через несколько секунд и отправьте фотографию ещё раз"
         )
         return
     except AIReceiptError as exc:
-        await update.message.reply_text(f"{exc} Пожалуйста, исправьте проблему и отправьте фотографию чека ещё раз.")
+        await update.message.reply_text(f"{exc} Пожалуйста, исправьте проблему и отправьте фотографию чека ещё раз")
         return
 
     session.receipt = receipt
     session.selected_item_index = None
     if not receipt.items and receipt.total == 0:
         await update.message.reply_text(
-            "OpenAI не смог выделить позиции из чека. Пожалуйста, отправьте команду /ocr, чтобы посмотреть сырой JSON распознавания."
+            "OpenAI не смог выделить позиции из чека. Пожалуйста, отправьте команду /ocr, чтобы посмотреть сырой JSON распознавания"
         )
     await update.message.reply_text("Чек распознан:\n\n" + serialize_receipt(receipt))
     await update.message.reply_text(
@@ -152,7 +159,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def recognize_receipt(image_bytes: bytes):
     if not os.getenv("OPENAI_API_KEY"):
         raise AIReceiptError(
-            "OpenAI API не настроено: переменная OPENAI_API_KEY не задана."
+            "OpenAI API не настроено: переменная OPENAI_API_KEY не задана"
         )
 
     receipt, ai_json = extract_receipt_with_ai(image_bytes)
@@ -164,7 +171,7 @@ async def recognize_receipt(image_bytes: bytes):
         )
         if not receipt_is_consistent(receipt):
             raise AIReceiptError(
-                "OpenAI API вернуло неконсистентный чек: сумма позиций не сходится с итогом."
+                "OpenAI API вернуло неконсистентный чек: сумма позиций не сходится с итогом"
             )
 
     raw_text = f"OpenAI JSON:\n{ai_json}"
@@ -213,7 +220,7 @@ def render_item_prompt(index: int, item, selected: str, total_items: int) -> str
         f"Кол-во: {item.quantity}\n"
         f"Сумма: {item.net_total:.2f} RUB\n"
         f"Сейчас выбрано: {selected}\n"
-        "Пожалуйста, выберите участников для этой позиции, затем нажмите «Дальше»."
+        "Пожалуйста, выберите участников для этой позиции, затем нажмите «Дальше»:"
     )
 
 
@@ -251,6 +258,15 @@ def build_final_review_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("Подтвердить", callback_data="final_confirm")],
             [InlineKeyboardButton("Пересчитать", callback_data="final_recalculate")],
+        ]
+    )
+
+
+def build_feedback_offer_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Оставить", callback_data="feedback_yes")],
+            [InlineKeyboardButton("В другой раз", callback_data="feedback_later")],
         ]
     )
 
@@ -300,13 +316,13 @@ def render_final_review(session, with_tips: bool) -> str:
         f"{title}\n\n"
         f"{render_review_assignments(session)}\n\n"
         f"{render_allocations(build_session_allocations(session))}\n\n"
-        "Пожалуйста, проверьте, кто какие позиции ел, и подтвердите расчёт."
+        "Пожалуйста, проверьте, кто какие позиции ел, и подтвердите расчёт:"
     )
 
 
 def render_review_assignments(session) -> str:
     if not session.receipt:
-        return "Позиции не найдены."
+        return "Позиции не найдены"
 
     lines = []
     for participant in session.participants:
@@ -344,6 +360,10 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     session = store.get(update.effective_chat.id)
     message_text = update.message.text.strip()
 
+    if session.awaiting_feedback:
+        await handle_feedback_input(update, session, message_text)
+        return
+
     if session.awaiting_tip_amount:
         tip_amount = parse_money_input(message_text)
         if tip_amount is None:
@@ -354,12 +374,45 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         session.tip_participants = []
         session.awaiting_tip_amount = False
         await update.message.reply_text(
-            f"Чаевые сохранены: {tip_amount:.2f} RUB\nПожалуйста, выберите, как их распределить.",
+            f"Чаевые сохранены: {tip_amount:.2f} RUB\nПожалуйста, выберите, как их распределить:",
             reply_markup=build_tip_split_keyboard(session.participants, session.tip_participants),
         )
         return
 
     await set_people(update, context)
+
+
+async def handle_feedback_input(update: Update, session, message_text: str) -> None:
+    if not message_text:
+        await update.message.reply_text("Пожалуйста, пришлите обратную связь обычным текстовым сообщением:")
+        return
+
+    session.awaiting_feedback = False
+    user = update.effective_user
+    try:
+        if feedback_storage_enabled():
+            append_feedback_row(
+                chat_id=update.effective_chat.id,
+                user_id=user.id if user else None,
+                username=user.username if user and user.username else "",
+                full_name=user.full_name if user else "",
+                participants=session.participants,
+                receipt_total=session.receipt.total if session.receipt else Decimal("0"),
+                tip_amount=session.tip_amount,
+                feedback_text=message_text,
+            )
+            await update.message.reply_text("Спасибо! Сохранил вашу обратную связь, чтобы стать еще лучше :)")
+            return
+
+        logging.warning("Feedback received, but Google Sheets is not configured.")
+        await update.message.reply_text(
+            "Спасибо за вашу обратную связь!"
+        )
+    except FeedbackStorageError as exc:
+        logging.exception("Failed to store feedback: %s", exc)
+        await update.message.reply_text(
+            "Спасибо за вашу обратную связь!"
+        )
 
 
 def parse_money_input(raw_value: str) -> Decimal | None:
@@ -379,7 +432,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     session = store.get(query.message.chat.id)
     if not session.receipt:
-        await query.edit_message_text("Сессия устарела. Пожалуйста, пришлите чек заново.")
+        await query.edit_message_text("Сессия устарела. Пожалуйста, пришлите чек заново")
         return
 
     if query.data.startswith("tips_"):
@@ -388,6 +441,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if query.data.startswith("final_"):
         await handle_final_callback(query, session)
+        return
+
+    if query.data.startswith("feedback_"):
+        await handle_feedback_callback(query, session)
         return
 
     payload = query.data.split(":")
@@ -430,7 +487,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not item.participants:
             await query.edit_message_text(
                 render_item_prompt(item_index, item, "никто", len(session.receipt.items))
-                + "\n\nПожалуйста, сначала укажите, кто ел эту позицию.",
+                + "\n\nПожалуйста, сначала укажите, кто ел эту позицию:",
                 reply_markup=build_item_keyboard(item_index, session.participants),
             )
             return
@@ -522,11 +579,28 @@ async def handle_tip_callback(query, session) -> None:
 async def handle_final_callback(query, session) -> None:
     if query.data == "final_confirm":
         tips_title = "Итог с чаевыми:" if session.tip_amount > 0 else "Итог без чаевых:"
-        await query.edit_message_text(
+        confirmation_text = (
             f"{tips_title}\n\n{render_review_assignments(session)}\n\n"
             f"{render_allocations(build_session_allocations(session))}\n\n"
-            "Расчёт подтверждён."
+            "Расчёт подтверждён"
         )
+        await query.edit_message_text(confirmation_text)
+        if feedback_storage_enabled():
+            try:
+                user = query.from_user
+                already_left_feedback = has_feedback_for_user(
+                    user_id=user.id if user else None,
+                    chat_id=query.message.chat.id,
+                )
+            except FeedbackStorageError as exc:
+                logging.exception("Failed to check feedback history: %s", exc)
+                already_left_feedback = True
+
+            if not already_left_feedback:
+                await query.message.reply_text(
+                    "Хотите оставить обратную связь?",
+                    reply_markup=build_feedback_offer_keyboard(),
+                )
         return
 
     if query.data == "final_recalculate":
@@ -550,12 +624,26 @@ async def handle_final_callback(query, session) -> None:
         return
 
 
+async def handle_feedback_callback(query, session) -> None:
+    if query.data == "feedback_yes":
+        session.awaiting_feedback = True
+        await query.edit_message_text(
+            "Напишите, пожалуйста, обратную связь одним сообщением:"
+        )
+        return
+
+    if query.data == "feedback_later":
+        session.awaiting_feedback = False
+        await query.edit_message_text("Хорошо, в другой раз")
+        return
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.exception("Unhandled Telegram update error", exc_info=context.error)
     if isinstance(update, Update) and update.effective_chat:
         try:
             await update.effective_chat.send_message(
-                "Произошла внутренняя ошибка. Пожалуйста, повторите действие ещё раз. Если проблема сохранится, отправьте фотографию чека заново."
+                "Произошла внутренняя ошибка. Пожалуйста, повторите действие ещё раз. Если проблема сохранится, отправьте фотографию чека заново"
             )
         except Exception:
             logging.exception("Failed to notify user about handler error")

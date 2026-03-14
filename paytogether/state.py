@@ -17,6 +17,7 @@ class SessionState:
     tip_amount: Decimal = field(default_factory=lambda: Decimal("0"))
     tip_participants: List[str] = field(default_factory=list)
     awaiting_tip_amount: bool = False
+    awaiting_feedback: bool = False
 
 
 class SessionStore:
