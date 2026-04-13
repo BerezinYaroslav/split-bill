@@ -4,7 +4,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Dict, Iterable, List
 
-from .models import Allocation, Receipt, ReceiptItem, money
+from .models import Allocation, Receipt, ReceiptItem, Settlement, money
 
 
 def auto_assign_evenly(receipt: Receipt, participants: List[str]) -> None:
@@ -86,3 +86,76 @@ def add_shared_amount(
         Allocation(participant=participant, amount=money(total))
         for participant, total in sorted(totals.items())
     ]
+
+
+def calculate_balances(
+    allocations: List[Allocation],
+    payments: Dict[str, Decimal],
+) -> Dict[str, Decimal]:
+    balances: Dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+
+    for allocation in allocations:
+        balances[allocation.participant] -= allocation.amount
+
+    for participant, amount in payments.items():
+        balances[participant] += money(amount)
+
+    return {
+        participant: money(amount)
+        for participant, amount in sorted(balances.items())
+    }
+
+
+def calculate_settlements(
+    allocations: List[Allocation],
+    payments: Dict[str, Decimal],
+) -> List[Settlement]:
+    balances = calculate_balances(allocations, payments)
+    creditors = [
+        [participant, amount]
+        for participant, amount in balances.items()
+        if amount > 0
+    ]
+    debtors = [
+        [participant, -amount]
+        for participant, amount in balances.items()
+        if amount < 0
+    ]
+
+    settlements: List[Settlement] = []
+    creditor_index = 0
+    debtor_index = 0
+
+    while debtor_index < len(debtors) and creditor_index < len(creditors):
+        debtor, debt_amount = debtors[debtor_index]
+        creditor, credit_amount = creditors[creditor_index]
+        transfer_amount = money(min(debt_amount, credit_amount))
+
+        if transfer_amount > 0:
+            settlements.append(
+                Settlement(
+                    debtor=debtor,
+                    creditor=creditor,
+                    amount=transfer_amount,
+                )
+            )
+
+        debtors[debtor_index][1] = money(debt_amount - transfer_amount)
+        creditors[creditor_index][1] = money(credit_amount - transfer_amount)
+
+        if debtors[debtor_index][1] == 0:
+            debtor_index += 1
+        if creditors[creditor_index][1] == 0:
+            creditor_index += 1
+
+    return settlements
+
+
+def render_settlements(settlements: List[Settlement]) -> str:
+    if not settlements:
+        return "Никто никому не должен."
+
+    return "\n".join(
+        f"{settlement.debtor} -> {settlement.creditor}: {settlement.amount:.2f} RUB"
+        for settlement in settlements
+    )

@@ -51,3 +51,9 @@ class Allocation:
     participant: str
     amount: Decimal
 
+
+@dataclass
+class Settlement:
+    debtor: str
+    creditor: str
+    amount: Decimal
