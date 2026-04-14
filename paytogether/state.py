@@ -33,6 +33,7 @@ class SessionState:
     awaiting_tip_segment_index: int | None = None
     awaiting_feedback: bool = False
     selecting_payer_segment_index: int | None = None
+    successful_calculation_count: int = 0
 
 
 class SessionStore:
@@ -43,4 +44,5 @@ class SessionStore:
         return self._sessions.setdefault(chat_id, SessionState())
 
     def reset(self, chat_id: int) -> None:
-        self._sessions[chat_id] = SessionState()
+        successful_calculation_count = self._sessions.get(chat_id, SessionState()).successful_calculation_count
+        self._sessions[chat_id] = SessionState(successful_calculation_count=successful_calculation_count)

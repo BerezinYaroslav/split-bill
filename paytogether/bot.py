@@ -43,6 +43,7 @@ logging.basicConfig(
 
 store = SessionStore()
 ALBUM_FLUSH_DELAY_SECONDS = 1.0
+FEEDBACK_PROMPT_CALCULATION_COUNTS = {1, 3, 5, 10}
 RETRY_PROMPT_SUFFIX = """
 Re-check all numeric amounts carefully.
 Important: if a price looks like 256, 290, 110 or 175 but the receipt total suggests a missing thousands digit,
@@ -61,7 +62,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 user_id=user.id if user else None,
                 username=user.username if user and user.username else "",
                 full_name=user.full_name if user else "",
-                participants=[],
             )
         except FeedbackStorageError as exc:
             logging.exception("Failed to ensure feedback user row: %s", exc)
@@ -685,7 +685,6 @@ async def handle_feedback_input(update: Update, session, message_text: str) -> N
                 user_id=user.id if user else None,
                 username=user.username if user and user.username else "",
                 full_name=user.full_name if user else "",
-                participants=session.participants,
                 feedback_text=message_text,
             )
             await update.message.reply_text("Спасибо! Сохранил вашу обратную связь, чтобы стать еще лучше :)")
@@ -980,6 +979,7 @@ async def handle_final_callback(query, session) -> None:
             "Расчёт подтверждён"
         )
         session.is_finalized = True
+        session.successful_calculation_count += 1
         await query.edit_message_text(confirmation_text)
         if feedback_storage_enabled():
             try:
@@ -992,7 +992,10 @@ async def handle_final_callback(query, session) -> None:
                 logging.exception("Failed to check feedback history: %s", exc)
                 already_left_feedback = True
 
-            if not already_left_feedback:
+            if (
+                not already_left_feedback
+                and session.successful_calculation_count in FEEDBACK_PROMPT_CALCULATION_COUNTS
+            ):
                 await query.message.reply_text(
                     "Хотите оставить обратную связь?",
                     reply_markup=build_feedback_offer_keyboard(),

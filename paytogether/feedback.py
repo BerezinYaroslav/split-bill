@@ -18,7 +18,6 @@ FEEDBACK_HEADERS = [
     "user_id",
     "username",
     "full_name",
-    "participants",
     "feedback_text",
 ]
 
@@ -40,7 +39,6 @@ def append_feedback_row(
     user_id: int | None,
     username: str,
     full_name: str,
-    participants: list[str],
     feedback_text: str,
 ) -> None:
     spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
@@ -56,7 +54,6 @@ def append_feedback_row(
         user_id=user_id,
         username=username,
         full_name=full_name,
-        participants=participants,
         feedback_text=feedback_text,
         overwrite_feedback_text=True,
     )
@@ -68,7 +65,6 @@ def ensure_feedback_user_row(
     user_id: int | None,
     username: str,
     full_name: str,
-    participants: list[str],
 ) -> None:
     spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
     worksheet_name = os.getenv("GOOGLE_SHEETS_WORKSHEET_NAME")
@@ -83,7 +79,6 @@ def ensure_feedback_user_row(
         user_id=user_id,
         username=username,
         full_name=full_name,
-        participants=participants,
         feedback_text="",
         overwrite_feedback_text=False,
     )
@@ -96,7 +91,13 @@ def has_feedback_for_user(*, user_id: int | None, chat_id: int) -> bool:
         return False
 
     worksheet = _open_worksheet(spreadsheet_id, worksheet_name)
-    return _find_feedback_row_index(worksheet=worksheet, user_id=user_id, chat_id=chat_id) is not None
+    row_index = _find_feedback_row_index(worksheet=worksheet, user_id=user_id, chat_id=chat_id)
+    if row_index is None:
+        return False
+
+    row = _get_row_values(worksheet, row_index)
+    headers = _get_headers(worksheet)
+    return bool(_extract_feedback_text(row=row, headers=headers).strip())
 
 
 def _ensure_feedback_headers(worksheet) -> None:
@@ -109,7 +110,7 @@ def _ensure_feedback_headers(worksheet) -> None:
         return
 
     try:
-        worksheet.update("A1:G1", [FEEDBACK_HEADERS], value_input_option="USER_ENTERED")
+        worksheet.update("A1:F1", [FEEDBACK_HEADERS], value_input_option="USER_ENTERED")
     except Exception as exc:
         raise FeedbackStorageError("Не удалось обновить заголовки Google Sheets.") from exc
 
@@ -121,7 +122,6 @@ def _upsert_feedback_row(
     user_id: int | None,
     username: str,
     full_name: str,
-    participants: list[str],
     feedback_text: str,
     overwrite_feedback_text: bool,
 ) -> None:
@@ -130,8 +130,7 @@ def _upsert_feedback_row(
     existing_feedback_text = ""
     if row_index is not None:
         existing_row = _get_row_values(worksheet, row_index)
-        if len(existing_row) >= 7:
-            existing_feedback_text = existing_row[6]
+        existing_feedback_text = _extract_feedback_text(row=existing_row, headers=_get_headers(worksheet))
 
     row: list[Any] = [
         now,
@@ -139,7 +138,6 @@ def _upsert_feedback_row(
         str(user_id or ""),
         username,
         full_name,
-        ", ".join(participants),
         feedback_text if overwrite_feedback_text else existing_feedback_text,
     ]
 
@@ -148,7 +146,7 @@ def _upsert_feedback_row(
         return
 
     worksheet.update(
-        f"A{row_index}:G{row_index}",
+        f"A{row_index}:F{row_index}",
         [row],
         value_input_option="USER_ENTERED",
     )
@@ -186,6 +184,20 @@ def _get_row_values(worksheet, row_index: int) -> list[str]:
         return worksheet.row_values(row_index)
     except Exception as exc:
         raise FeedbackStorageError("Не удалось прочитать строку из Google Sheets.") from exc
+
+
+def _get_headers(worksheet) -> list[str]:
+    return _get_row_values(worksheet, 1)
+
+
+def _extract_feedback_text(*, row: list[str], headers: list[str]) -> str:
+    try:
+        feedback_text_index = headers.index("feedback_text")
+    except ValueError:
+        return ""
+    if feedback_text_index >= len(row):
+        return ""
+    return row[feedback_text_index]
 
 
 def _open_worksheet(spreadsheet_id: str, worksheet_name: str):
