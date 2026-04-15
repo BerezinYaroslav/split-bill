@@ -998,7 +998,7 @@ async def handle_final_callback(query, session) -> None:
             f"{render_allocations(allocations)}\n\n"
             f"{render_payments_summary(session)}\n\n"
             f"{render_settlement_summary(session, allocations)}\n\n"
-            "Расчёт подтверждён"
+            "Расчёт подтверждён. Чтобы разделить новые чеки, просто пришлите их фото"
         )
         session.is_finalized = True
         session.successful_calculation_count += 1
