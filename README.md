@@ -47,7 +47,7 @@ Telegram-бот для разделения ресторанного чека п
 ## Команды
 
 - `/start` — сбросить текущую сессию и начать заново;
-- `/ocr` — показать сырой текст/JSON распознавания для отладки;
+- `/donat` — получить ссылку для финансовой поддержки команды;
 - `/summary` — показать текущий итоговый split;
 - `/reset` — очистить текущую сессию.
 
@@ -69,6 +69,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN=...
 export OPENAI_API_KEY=...
+export DONAT_URL=https://www.tbank.ru/cf/7EvxbaCsoLS
 python3 main.py
 ```
 

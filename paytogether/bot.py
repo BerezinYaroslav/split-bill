@@ -50,6 +50,7 @@ Important: if a price looks like 256, 290, 110 or 175 but the receipt total sugg
 recover the full amount such as 1 256, 1 290, 1 110, 5 175.
 Make sure the sum of item totals minus discounts matches subtotal or final total as closely as possible.
 """.strip()
+DEFAULT_DONAT_URL = "https://www.tbank.ru/cf/7EvxbaCsoLS"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -75,9 +76,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Команды:\n"
         "/start - Новая серия чеков\n"
         "/feedback - Оставить или обновить отзыв\n"
-        "/ocr - Показать сырой JSON распознавания OpenAI\n"
+        "/donat - Поддержать команду СплитБил\n"
         "/summary - Текущий итог\n"
         "/reset - Сбросить сессию"
+    )
+
+
+async def donat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    donat_url = os.getenv("DONAT_URL", DEFAULT_DONAT_URL)
+    await update.message.reply_text(
+        "Чаевые официанту оставили, а нам на кофе? ☕😊\n"
+        f"Помочь в развитии стартапа можно по ссылке: {donat_url}"
     )
 
 
@@ -352,7 +361,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     segment = append_receipt_to_session(session, receipt, raw_text)
     if not receipt.items and receipt.total == 0:
         await update.message.reply_text(
-            "OpenAI не смог выделить позиции из чека. Пожалуйста, отправьте команду /ocr, чтобы посмотреть сырой JSON распознавания"
+            "OpenAI не смог выделить позиции из чека"
         )
     segment_title = format_segment_title(session, segment)
     summary_prefix = f"{segment_title} распознано:\n\n" if segment_title else ""
@@ -1062,6 +1071,7 @@ def build_application(token: str) -> Application:
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("feedback", feedback_command))
+    application.add_handler(CommandHandler("donat", donat_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("ocr", show_ocr))
     application.add_handler(CommandHandler("reset", reset))

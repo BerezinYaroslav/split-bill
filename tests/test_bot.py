@@ -22,6 +22,7 @@ sys.modules.setdefault("openai", openai_stub)
 
 from paytogether.bot import (
     append_receipt_to_session,
+    donat_command,
     handle_final_callback,
     render_final_review,
 )
@@ -76,6 +77,26 @@ class FakeMessage:
 
     async def reply_text(self, text, reply_markup=None):
         self.reply_calls.append((text, reply_markup))
+
+
+class FakeUpdate:
+    def __init__(self):
+        self.message = FakeMessage()
+
+
+def test_donat_command_uses_env_link(monkeypatch):
+    monkeypatch.setenv("DONAT_URL", "https://example.com/donate")
+    update = FakeUpdate()
+
+    asyncio.run(donat_command(update, None))
+
+    assert update.message.reply_calls == [
+        (
+            "Чаевые официанту оставили, а нам на кофе? ☕😊\n"
+            "Помочь в развитии стартапа можно по ссылке: https://example.com/donate",
+            None,
+        )
+    ]
 
 
 class FakeQuery:
