@@ -67,18 +67,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except FeedbackStorageError as exc:
             logging.exception("Failed to ensure feedback user row: %s", exc)
     await update.message.reply_text(
-        "Привет! Пожалуйста, пришлите фотографию одного или нескольких чеков, а я распознаю их и помогу разделить"
+        "Привет! Я СплитБил — бот, который помогает быстро и удобно разделить чек между участниками\n\n"
+        "Пришлите мне фото одного или нескольких чеков, и я:\n"
+        "- распознаю позиции и суммы\n"
+        "- помогу распределить заказ между участниками\n"
+        "- посчитаю, кто и сколько должен\n\n"
+        "Доступные команды:\n"
+        "/start — начать заново\n"
+        "/help — показать список команд\n"
+        "/summary — показать текущий итог\n"
+        "/reset — сбросить текущую сессию\n"
+        "/feedback — оставить отзыв\n"
+        "/donat — поддержать проект\n\n"
+        "Просто отправьте один или несколько чеков, и начнем!"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Команды:\n"
-        "/start - Новая серия чеков\n"
-        "/feedback - Оставить или обновить отзыв\n"
-        "/donat - Поддержать команду СплитБил\n"
-        "/summary - Текущий итог\n"
-        "/reset - Сбросить сессию"
+        "/start — начать заново\n"
+        "/help — показать список команд\n"
+        "/summary — показать текущий итог\n"
+        "/reset — сбросить текущую сессию\n"
+        "/feedback — оставить отзыв\n"
+        "/donat — поддержать проект"
     )
 
 
