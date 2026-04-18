@@ -403,6 +403,7 @@ def serialize_receipt(receipt: Receipt) -> str:
             f"{index}. {item.name} x{item.quantity} = {item.net_total:.2f} RUB"
         )
     lines.append(f"\nПромежуточный итог: {receipt.subtotal:.2f} RUB")
-    lines.append(f"Сервисный сбор: {receipt.service_charge:.2f} RUB")
+    if receipt.service_charge > 0:
+        lines.append(f"Сервисный сбор: {receipt.service_charge:.2f} RUB")
     lines.append(f"Итого: {receipt.total:.2f} RUB")
     return "\n".join(lines)

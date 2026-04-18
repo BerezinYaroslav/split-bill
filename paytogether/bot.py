@@ -25,6 +25,7 @@ from .feedback import (
     feedback_storage_enabled,
     has_feedback_for_user,
 )
+from .models import money
 from .parser import serialize_receipt
 from .splitter import (
     add_shared_amount,
@@ -111,7 +112,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     session.awaiting_feedback = True
-    prompt = "Напишите, пожалуйста, обратную связь одним сообщением:"
+    prompt = "Напишите, пожалуйста, обратную связь одним сообщением (фото пока приложить нельзя):"
 
     if feedback_storage_enabled():
         try:
@@ -178,6 +179,12 @@ def format_segment_prefix(session, segment: ReceiptSegment | None) -> str:
     return f"{title}\n" if title else ""
 
 
+def render_recognized_receipt_summary(session, segment: ReceiptSegment | None, receipt, force_segment_title: bool = False) -> str:
+    segment_title = segment.title if force_segment_title and segment else format_segment_title(session, segment)
+    summary_prefix = f"{segment_title} распознано:\n\n" if segment_title else ""
+    return summary_prefix + serialize_receipt(receipt)
+
+
 def get_segment_for_item_index(session, item_index: int) -> tuple[int, ReceiptSegment] | tuple[None, None]:
     for index, segment in enumerate(session.receipt_segments):
         if segment.start_index <= item_index <= segment.end_index:
@@ -222,6 +229,8 @@ async def flush_album_receipts_after_delay(application: Application, chat_id: in
     album_start_index = len(session.receipt.items) if session.receipt else 0
     summaries: List[str] = []
 
+    force_segment_titles = len(photo_file_ids) > 1
+
     for photo_file_id in photo_file_ids:
         try:
             telegram_file = await application.bot.get_file(
@@ -239,9 +248,14 @@ async def flush_album_receipts_after_delay(application: Application, chat_id: in
             )
             receipt, raw_text, warning = await recognize_receipt(bytes(image_bytes))
             segment = append_receipt_to_session(session, receipt, raw_text)
-            segment_title = format_segment_title(session, segment)
-            summary_prefix = f"{segment_title} распознано:\n\n" if segment_title else ""
-            summaries.append(summary_prefix + serialize_receipt(receipt))
+            summaries.append(
+                render_recognized_receipt_summary(
+                    session,
+                    segment,
+                    receipt,
+                    force_segment_title=force_segment_titles,
+                )
+            )
         except (TimedOut, NetworkError):
             summaries.append("Не удалось обработать один из чеков из-за ошибки Telegram. Попробуйте отправить альбом ещё раз.")
         except AIReceiptError as exc:
@@ -279,11 +293,14 @@ async def send_post_receipt_message(
 async def set_people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     raw = update.message.text.strip()
-    participants = [name.strip() for name in raw.split(",") if name.strip()]
-    session.participants = participants
-    if not participants:
-        await update.message.reply_text("Пожалуйста, укажите участников через запятую: Ярослав, Лера")
+    participants = parse_participants_input(raw)
+    if participants is None:
+        await update.message.reply_text(
+            "Пожалуйста, укажите минимум двух участников и разделите их запятой: Ярослав, Лера"
+        )
         return
+
+    session.participants = participants
 
     await update.message.reply_text(
         "Участники сохранены: " + ", ".join(participants)
@@ -291,6 +308,17 @@ async def set_people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if session.receipt:
         session.selected_item_index = next_displayable_item_index(session.receipt.items, 0)
         await send_current_item(update.effective_chat.id, context, session)
+
+
+def parse_participants_input(raw: str) -> List[str] | None:
+    if "," not in raw:
+        return None
+
+    participants = [name.strip() for name in raw.split(",") if name.strip()]
+    unique_participants = list(dict.fromkeys(participants))
+    if len(unique_participants) < 2:
+        return None
+    return unique_participants
 
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -376,9 +404,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(
             "OpenAI не смог выделить позиции из чека"
         )
-    segment_title = format_segment_title(session, segment)
-    summary_prefix = f"{segment_title} распознано:\n\n" if segment_title else ""
-    summary_text = summary_prefix + serialize_receipt(receipt)
+    summary_text = render_recognized_receipt_summary(session, segment, receipt)
 
     await update.message.reply_text(summary_text)
     await send_post_receipt_message(
@@ -396,12 +422,14 @@ async def recognize_receipt(image_bytes: bytes):
         )
 
     receipt, ai_json = extract_receipt_with_ai(image_bytes)
+    normalize_receipt_totals(receipt)
     if not receipt_is_consistent(receipt):
         retry_prompt = f"{PROMPT}\n\n{RETRY_PROMPT_SUFFIX}"
         receipt, ai_json = extract_receipt_with_ai_prompt(
             image_bytes,
             retry_prompt,
         )
+        normalize_receipt_totals(receipt)
         if not receipt_is_consistent(receipt):
             raise AIReceiptError(
                 "OpenAI API вернуло неконсистентный чек: сумма позиций не сходится с итогом"
@@ -429,18 +457,19 @@ async def send_current_item(chat_id: int, context: ContextTypes.DEFAULT_TYPE, se
     await context.bot.send_message(
         chat_id=chat_id,
         text=place_title + render_item_prompt(session.selected_item_index, item, selected, len(session.receipt.items)),
-        reply_markup=build_item_keyboard(session.selected_item_index, session.participants),
+        reply_markup=build_item_keyboard(session.selected_item_index, session.participants, bool(item.participants)),
     )
 
 
-def build_item_keyboard(index: int, participants: List[str]) -> InlineKeyboardMarkup:
+def build_item_keyboard(index: int, participants: List[str], has_selection: bool = False) -> InlineKeyboardMarkup:
     rows = []
     for participant in participants:
         rows.append(
             [InlineKeyboardButton(participant, callback_data=f"toggle:{index}:{participant}")]
         )
     rows.append([InlineKeyboardButton("Поделить на всех", callback_data=f"all:{index}")])
-    rows.append([InlineKeyboardButton("Дальше", callback_data=f"next:{index}")])
+    if has_selection:
+        rows.append([InlineKeyboardButton("Дальше", callback_data=f"next:{index}")])
     rows.append([InlineKeyboardButton("Назад", callback_data=f"back:{index}")])
     return InlineKeyboardMarkup(rows)
 
@@ -462,7 +491,7 @@ def render_item_prompt(index: int, item, selected: str, total_items: int) -> str
         f"Кол-во: {item.quantity}\n"
         f"Сумма: {item.net_total:.2f} RUB\n"
         f"Сейчас выбрано: {selected}\n"
-        "Пожалуйста, выберите участников для этой позиции, затем нажмите «Дальше»:"
+        "Пожалуйста, выберите участников для этой позиции:"
     )
 
 
@@ -479,7 +508,7 @@ def render_payments_summary(session) -> str:
         if segment.tip_amount > 0:
             tip_payer = segment.tip_payer_name or "пока не выбран"
             if segment_title:
-                lines.append(f"{segment_title} / чаевые: оплатил {tip_payer}, сумма {segment.tip_amount:.2f} RUB")
+                lines.append(f"{segment_title} чаевые: оплатил {tip_payer}, сумма {segment.tip_amount:.2f} RUB")
             else:
                 lines.append(f"Чаевые: оплатил {tip_payer}, сумма {segment.tip_amount:.2f} RUB")
 
@@ -564,9 +593,100 @@ def receipt_items_total(receipt) -> Decimal:
     return sum((item.total_price - item.discount for item in receipt.items), Decimal("0"))
 
 
+def best_receipt_target(receipt) -> Decimal:
+    if receipt.subtotal > 0:
+        return receipt.subtotal
+    if receipt.total > 0 and receipt.service_charge >= 0 and receipt.tips >= 0:
+        net_total = receipt.total - receipt.service_charge - receipt.tips
+        if net_total > 0:
+            return net_total
+    if receipt.total > 0:
+        return receipt.total
+    return Decimal("0")
+
+
+def rebalance_receipt_discounts(receipt, discount_delta: Decimal) -> bool:
+    discount_delta = money(discount_delta)
+    if discount_delta == 0:
+        return False
+
+    increasing_discount = discount_delta > 0
+    if increasing_discount:
+        candidates = [item for item in receipt.items if item.total_price > item.discount]
+    else:
+        candidates = [item for item in receipt.items if item.discount > 0]
+    if not candidates:
+        return False
+
+    discounted_candidates = [item for item in candidates if item.discount > 0]
+    if increasing_discount and discounted_candidates:
+        candidates = discounted_candidates
+
+    total_adjustment = abs(discount_delta)
+    remaining = total_adjustment
+    total_basis = sum(
+        (
+            item.total_price - item.discount
+            if increasing_discount
+            else item.discount
+            for item in candidates
+        ),
+        Decimal("0"),
+    )
+    if total_basis <= 0:
+        return False
+
+    for item in candidates[:-1]:
+        item_basis = item.total_price - item.discount if increasing_discount else item.discount
+        share = money(total_adjustment * item_basis / total_basis)
+        max_share = money(item.total_price - item.discount) if increasing_discount else money(item.discount)
+        share = min(share, max_share)
+        if increasing_discount:
+            item.discount += share
+        else:
+            item.discount -= share
+        remaining -= share
+
+    last_item = candidates[-1]
+    max_last_share = (
+        money(last_item.total_price - last_item.discount)
+        if increasing_discount
+        else money(last_item.discount)
+    )
+    last_share = min(money(remaining), max_last_share)
+    if increasing_discount:
+        last_item.discount += last_share
+    else:
+        last_item.discount -= last_share
+    remaining -= last_share
+
+    return abs(remaining) <= Decimal("0.01")
+
+
+def normalize_receipt_totals(receipt) -> bool:
+    if not receipt.items:
+        return False
+
+    target = best_receipt_target(receipt)
+    if target <= 0:
+        return False
+
+    items_total = receipt_items_total(receipt)
+    delta = money(items_total - target)
+    if delta == 0:
+        return False
+
+    relative_delta = abs(delta) / target if target else Decimal("0")
+    if relative_delta > Decimal("0.25"):
+        return False
+
+    return rebalance_receipt_discounts(receipt, delta)
+
+
 def receipt_consistency_delta(receipt) -> Decimal:
     items_total = receipt_items_total(receipt)
-    targets = [value for value in (receipt.subtotal, receipt.total) if value > 0]
+    derived_total = receipt.total - receipt.service_charge - receipt.tips
+    targets = [value for value in (receipt.subtotal, derived_total, receipt.total) if value > 0]
     if not targets:
         return Decimal("0")
     return min(abs(items_total - target) for target in targets)
@@ -577,7 +697,8 @@ def receipt_is_consistent(receipt) -> bool:
         return True
 
     items_total = receipt_items_total(receipt)
-    targets = [value for value in (receipt.subtotal, receipt.total) if value > 0]
+    derived_total = receipt.total - receipt.service_charge - receipt.tips
+    targets = [value for value in (receipt.subtotal, derived_total, receipt.total) if value > 0]
     if not targets:
         return True
 
@@ -633,9 +754,10 @@ def render_review_assignments(session) -> str:
             ]
             lines.append(f"{participant}:")
             if participant_items:
-                lines.extend(participant_items)
+                lines.extend(f"- {item_name}" for item_name in participant_items)
             else:
                 lines.append("ничего не выбрано")
+            lines.append("")
         if segment.tip_amount > 0 and segment.tip_participants:
             lines.append(f"Чаевые {segment.tip_amount:.2f} RUB: " + ", ".join(segment.tip_participants))
             lines.append(f"Оплатил чаевые: {segment.tip_payer_name or 'пока не выбран'}")
@@ -783,7 +905,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(
                 render_item_prompt(item_index, item, "никто", len(session.receipt.items))
                 + "\n\nПожалуйста, сначала укажите, кто ел эту позицию:",
-                reply_markup=build_item_keyboard(item_index, session.participants),
+                reply_markup=build_item_keyboard(item_index, session.participants, False),
             )
             return
 
@@ -798,7 +920,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         place_title = format_segment_prefix(session, previous_segment)
         await query.edit_message_text(
             place_title + render_item_prompt(previous_index, previous_item, previous_selected, len(session.receipt.items)),
-            reply_markup=build_item_keyboard(previous_index, session.participants),
+            reply_markup=build_item_keyboard(previous_index, session.participants, bool(previous_item.participants)),
         )
         return
 
@@ -807,7 +929,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     place_title = format_segment_prefix(session, segment)
     await query.edit_message_text(
         place_title + render_item_prompt(item_index, item, selected, len(session.receipt.items)),
-        reply_markup=build_item_keyboard(item_index, session.participants),
+        reply_markup=build_item_keyboard(item_index, session.participants, bool(item.participants)),
     )
 
 
@@ -850,7 +972,7 @@ async def advance_after_item_selection(query, session, item_index: int) -> None:
             next_selected,
             len(session.receipt.items),
         ),
-        reply_markup=build_item_keyboard(next_index, session.participants),
+        reply_markup=build_item_keyboard(next_index, session.participants, bool(next_item.participants)),
     )
 
 
@@ -1051,7 +1173,7 @@ async def handle_feedback_callback(query, session) -> None:
     if query.data == "feedback_yes":
         session.awaiting_feedback = True
         await query.edit_message_text(
-            "Напишите, пожалуйста, обратную связь одним сообщением:"
+            "Напишите, пожалуйста, обратную связь одним сообщением (фото пока приложить нельзя):"
         )
         return
 

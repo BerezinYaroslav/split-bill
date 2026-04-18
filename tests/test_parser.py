@@ -1,6 +1,7 @@
 from decimal import Decimal
 
-from paytogether.parser import attach_service_charge, clean_item_name, parse_receipt, try_parse_item
+from paytogether.parser import attach_service_charge, clean_item_name, parse_receipt, serialize_receipt, try_parse_item
+from paytogether.models import Receipt, ReceiptItem
 
 
 def test_try_parse_item_extracts_name_qty_and_price():
@@ -93,3 +94,22 @@ def test_parse_receipt_handles_multiline_ocr_like_layout():
     assert receipt.items[1].discount == Decimal("90.00")
     assert receipt.subtotal == Decimal("1278.00")
     assert receipt.total == Decimal("1278.00")
+
+
+def test_serialize_receipt_hides_zero_service_charge():
+    receipt = Receipt(
+        items=[
+            ReceiptItem(
+                name="Бургер",
+                quantity=Decimal("1"),
+                total_price=Decimal("100.00"),
+            )
+        ],
+        subtotal=Decimal("100.00"),
+        total=Decimal("100.00"),
+        service_charge=Decimal("0.00"),
+    )
+
+    serialized = serialize_receipt(receipt)
+
+    assert "Сервисный сбор" not in serialized
