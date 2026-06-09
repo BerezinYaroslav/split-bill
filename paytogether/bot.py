@@ -36,6 +36,7 @@ from .splitter import (
     render_settlements,
 )
 from .state import ReceiptSegment, SessionStore
+from .texts import button, random_phrase, text, tone_experiments_enabled
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -44,6 +45,7 @@ logging.basicConfig(
 
 store = SessionStore()
 ALBUM_FLUSH_DELAY_SECONDS = 1.0
+FEEDBACK_OFFER_DELAY_SECONDS = 300
 FEEDBACK_PROMPT_CALCULATION_COUNTS = {1, 3, 5, 10}
 RETRY_PROMPT_SUFFIX = """
 Re-check all numeric amounts carefully.
@@ -68,31 +70,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except FeedbackStorageError as exc:
             logging.exception("Failed to ensure feedback user row: %s", exc)
     await update.message.reply_text(
-        "Привет! Я СплитБил — бот, который помогает быстро и удобно разделить чек между участниками\n\n"
-        "Пришлите мне фото одного или нескольких чеков, и я:\n"
-        "- распознаю позиции и суммы\n"
-        "- помогу распределить заказ между участниками\n"
-        "- посчитаю, кто и сколько должен\n\n"
-        "Доступные команды:\n"
-        "/start — начать заново\n"
-        "/help — показать список команд\n"
-        "/summary — показать текущий итог\n"
-        "/reset — сбросить текущую сессию\n"
-        "/feedback — оставить отзыв\n"
-        "/donat — поддержать проект\n\n"
-        "Просто отправьте один или несколько чеков, и начнем!"
+        text("start")
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Команды:\n"
-        "/start — начать заново\n"
-        "/help — показать список команд\n"
-        "/summary — показать текущий итог\n"
-        "/reset — сбросить текущую сессию\n"
-        "/feedback — оставить отзыв\n"
-        "/donat — поддержать проект"
+        text("help")
     )
 
 
@@ -106,13 +90,13 @@ async def donat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store.reset(update.effective_chat.id)
-    await update.message.reply_text("Сессия очищена. Пожалуйста, пришлите новый чек или несколько чеков подряд")
+    await update.message.reply_text(text("reset"))
 
 
 async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     session.awaiting_feedback = True
-    prompt = "Напишите, пожалуйста, обратную связь одним сообщением (фото пока приложить нельзя):"
+    prompt = text("feedback_prompt")
 
     if feedback_storage_enabled():
         try:
@@ -126,7 +110,7 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             already_left_feedback = False
 
         if already_left_feedback:
-            prompt = "Вы уже оставляли отзыв. Пришлите новый текст одним сообщением, и я перезапишу его:"
+            prompt = text("feedback_prompt_repeat")
 
     await update.message.reply_text(prompt)
 
@@ -181,8 +165,12 @@ def format_segment_prefix(session, segment: ReceiptSegment | None) -> str:
 
 def render_recognized_receipt_summary(session, segment: ReceiptSegment | None, receipt, force_segment_title: bool = False) -> str:
     segment_title = segment.title if force_segment_title and segment else format_segment_title(session, segment)
-    summary_prefix = f"{segment_title} распознано:\n\n" if segment_title else ""
-    return summary_prefix + serialize_receipt(receipt)
+    summary_title = f"{segment_title}\n" if segment_title else ""
+    return (
+        f"{summary_title}{text('receipt_after_recognition')}\n\n"
+        f"{serialize_receipt(receipt)}\n\n"
+        f"{text('receipt_after_recognition_check')}"
+    )
 
 
 def get_segment_for_item_index(session, item_index: int) -> tuple[int, ReceiptSegment] | tuple[None, None]:
@@ -212,6 +200,36 @@ def all_tip_payers_selected(session) -> bool:
 
 def schedule_album_flush(application: Application, chat_id: int, generation: int) -> None:
     application.create_task(flush_album_receipts_after_delay(application, chat_id, generation))
+
+
+def schedule_feedback_offer(application: Application, chat_id: int, user_id: int | None, generation: int) -> None:
+    application.create_task(_send_feedback_offer_after_delay(application, chat_id, user_id, generation))
+
+
+async def _send_feedback_offer_after_delay(
+    application: Application, chat_id: int, user_id: int | None, generation: int
+) -> None:
+    await asyncio.sleep(FEEDBACK_OFFER_DELAY_SECONDS)
+    session = store.get(chat_id)
+    if generation != session.feedback_offer_generation:
+        return
+    if not feedback_storage_enabled():
+        return
+    try:
+        already_left_feedback = has_feedback_for_user(user_id=user_id, chat_id=chat_id)
+    except FeedbackStorageError as exc:
+        logging.exception("Failed to check feedback history for delayed offer: %s", exc)
+        return
+    if already_left_feedback:
+        return
+    try:
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=text("feedback_offer"),
+            reply_markup=build_feedback_offer_keyboard(),
+        )
+    except Exception as exc:
+        logging.exception("Failed to send delayed feedback offer: %s", exc)
 
 
 async def flush_album_receipts_after_delay(application: Application, chat_id: int, generation: int) -> None:
@@ -257,9 +275,9 @@ async def flush_album_receipts_after_delay(application: Application, chat_id: in
                 )
             )
         except (TimedOut, NetworkError):
-            summaries.append("Не удалось обработать один из чеков из-за ошибки Telegram. Попробуйте отправить альбом ещё раз.")
+            summaries.append(text("album_processing_error"))
         except AIReceiptError as exc:
-            summaries.append(f"Не удалось распознать один из чеков: {exc}")
+            summaries.append(text("album_recognition_error", error=exc))
 
     session.active_media_group_id = ""
     if summaries:
@@ -275,9 +293,14 @@ async def send_post_receipt_message(
 ) -> None:
     bot = getattr(app_or_context, "bot", None) or app_or_context.bot
     if not session.participants:
+        prompt_variant = random_phrase("participants_prompt") if tone_experiments_enabled() else ""
         await bot.send_message(
             chat_id=chat_id,
-            text="Можно прислать ещё чеки, если мест было несколько. Когда все фото будут загружены, пришлите участников через запятую: Иван, Полина, Денис",
+            text=(
+                text("participants_prompt")
+                if not prompt_variant
+                else f"{prompt_variant}\n\n{text('participants_prompt')}"
+            ),
         )
         return
 
@@ -296,14 +319,14 @@ async def set_people(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     participants = parse_participants_input(raw)
     if participants is None:
         await update.message.reply_text(
-            "Пожалуйста, укажите минимум двух участников и разделите их запятой: Ярослав, Лера"
+            text("participants_invalid")
         )
         return
 
     session.participants = participants
 
     await update.message.reply_text(
-        "Участники сохранены: " + ", ".join(participants)
+        text("participants_saved", participants=", ".join(participants))
     )
     if session.receipt:
         session.selected_item_index = next_displayable_item_index(session.receipt.items, 0)
@@ -324,7 +347,7 @@ def parse_participants_input(raw: str) -> List[str] | None:
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     if not session.receipt:
-        await update.message.reply_text("Сначала, пожалуйста, пришлите фотографию чека")
+        await update.message.reply_text(text("need_receipt"))
         return
 
     allocations = build_session_allocations(session)
@@ -339,7 +362,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session = store.get(update.effective_chat.id)
     if not session.raw_ocr_text:
-        await update.message.reply_text("Сырого JSON распознавания пока нет. Сначала, пожалуйста, пришлите фотографию чека")
+        await update.message.reply_text(text("need_receipt_for_ocr"))
         return
 
     chunks = [
@@ -362,14 +385,14 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if session.active_media_group_id != media_group_id:
             session.active_media_group_id = media_group_id
             session.pending_album_photo_file_ids = []
-            await update.message.reply_text("Фотографии получены, чеки обрабатываются. Пожалуйста, подождите")
+            await update.message.reply_text(random_phrase("processing_album") or random_phrase("processing_photo"))
         session.pending_album_photo_file_ids.append(photo.file_id)
         session.pending_album_generation += 1
         schedule_album_flush(context.application, update.effective_chat.id, session.pending_album_generation)
         return
 
     if not media_group_id:
-        await update.message.reply_text("Фотография получена, чек обрабатывается. Пожалуйста, подождите")
+        await update.message.reply_text(random_phrase("processing_photo"))
 
     try:
         telegram_file = await photo.get_file(
@@ -387,22 +410,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         receipt, raw_text, warning = await recognize_receipt(bytes(image_bytes))
     except TimedOut:
         await update.message.reply_text(
-            "Telegram слишком долго передавал файл. Пожалуйста, отправьте фотографию ещё раз или используйте изображение меньшего размера"
+            text("telegram_timeout")
         )
         return
     except NetworkError:
         await update.message.reply_text(
-            "Не удалось скачать фотографию из Telegram из-за сетевой ошибки. Пожалуйста, повторите попытку через несколько секунд и отправьте фотографию ещё раз"
+            text("telegram_network")
         )
         return
     except AIReceiptError as exc:
-        await update.message.reply_text(f"{exc} Пожалуйста, исправьте проблему и отправьте фотографию чека ещё раз")
+        await update.message.reply_text(text("recognition_error", error=exc))
         return
 
     segment = append_receipt_to_session(session, receipt, raw_text)
     if not receipt.items and receipt.total == 0:
         await update.message.reply_text(
-            "OpenAI не смог выделить позиции из чека"
+            text("empty_receipt")
         )
     summary_text = render_recognized_receipt_summary(session, segment, receipt)
 
@@ -457,20 +480,22 @@ async def send_current_item(chat_id: int, context: ContextTypes.DEFAULT_TYPE, se
     await context.bot.send_message(
         chat_id=chat_id,
         text=place_title + render_item_prompt(session.selected_item_index, item, selected, len(session.receipt.items)),
-        reply_markup=build_item_keyboard(session.selected_item_index, session.participants, bool(item.participants)),
+        reply_markup=build_item_keyboard(session.selected_item_index, session.participants, item.participants),
     )
 
 
-def build_item_keyboard(index: int, participants: List[str], has_selection: bool = False) -> InlineKeyboardMarkup:
+def build_item_keyboard(index: int, participants: List[str], selected_participants: List[str] | None = None) -> InlineKeyboardMarkup:
+    selected = selected_participants or []
     rows = []
     for participant in participants:
+        marker = "✓ " if participant in selected else ""
         rows.append(
-            [InlineKeyboardButton(participant, callback_data=f"toggle:{index}:{participant}")]
+            [InlineKeyboardButton(f"{marker}{participant}", callback_data=f"toggle:{index}:{participant}")]
         )
-    rows.append([InlineKeyboardButton("Поделить на всех", callback_data=f"all:{index}")])
-    if has_selection:
-        rows.append([InlineKeyboardButton("Дальше", callback_data=f"next:{index}")])
-    rows.append([InlineKeyboardButton("Назад", callback_data=f"back:{index}")])
+    rows.append([InlineKeyboardButton(button("split_all"), callback_data=f"all:{index}")])
+    if selected:
+        rows.append([InlineKeyboardButton(button("next"), callback_data=f"next:{index}")])
+    rows.append([InlineKeyboardButton(button("back"), callback_data=f"back:{index}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -486,12 +511,13 @@ def build_payer_keyboard(prefix: str, participants: List[str], selected_payer: s
 
 def render_item_prompt(index: int, item, selected: str, total_items: int) -> str:
     return (
+        f"{text('item_intro')}\n\n"
         f"Позиция {index + 1} из {total_items}\n"
         f"{item.name}\n"
         f"Кол-во: {item.quantity}\n"
         f"Сумма: {item.net_total:.2f} RUB\n"
         f"Сейчас выбрано: {selected}\n"
-        "Пожалуйста, выберите участников для этой позиции:"
+        f"{text('item_select_suffix')}"
     )
 
 
@@ -552,30 +578,26 @@ def has_any_tips(session) -> bool:
 def build_tip_decision_keyboard(segment_index: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Да, добавить чаевые", callback_data=f"tips_yes:{segment_index}")],
-            [InlineKeyboardButton("Нет, без чаевых", callback_data=f"tips_no:{segment_index}")],
+            [InlineKeyboardButton(button("tips_yes"), callback_data=f"tips_yes:{segment_index}")],
+            [InlineKeyboardButton(button("tips_no"), callback_data=f"tips_no:{segment_index}")],
         ]
     )
 
-
-def build_tip_split_keyboard(segment_index: int, participants: List[str], selected_participants: List[str]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("Разделить на всех", callback_data=f"tips_all:{segment_index}")],
-    ]
-    for participant in participants:
-        marker = "✓ " if participant in selected_participants else ""
-        rows.append(
-            [InlineKeyboardButton(f"{marker}{participant}", callback_data=f"tips_toggle:{segment_index}:{participant}")]
-        )
-    rows.append([InlineKeyboardButton("Готово", callback_data=f"tips_done:{segment_index}")])
-    return InlineKeyboardMarkup(rows)
 
 
 def build_final_review_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Подтвердить", callback_data="final_confirm")],
-            [InlineKeyboardButton("Пересчитать", callback_data="final_recalculate")],
+            [InlineKeyboardButton(button("confirm"), callback_data="final_confirm")],
+            [InlineKeyboardButton(button("recalculate"), callback_data="final_recalculate")],
+        ]
+    )
+
+
+def build_final_details_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(button("show_details"), callback_data="final_details")],
         ]
     )
 
@@ -583,8 +605,8 @@ def build_final_review_keyboard() -> InlineKeyboardMarkup:
 def build_feedback_offer_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Оставить", callback_data="feedback_yes")],
-            [InlineKeyboardButton("В другой раз", callback_data="feedback_later")],
+            [InlineKeyboardButton(button("leave_feedback"), callback_data="feedback_yes")],
+            [InlineKeyboardButton(button("feedback_later"), callback_data="feedback_later")],
         ]
     )
 
@@ -731,7 +753,18 @@ def render_final_review(session, with_tips: bool) -> str:
         f"{render_allocations(allocations)}\n\n"
         f"{render_payments_summary(session)}\n\n"
         f"{render_settlement_summary(session, allocations)}\n\n"
-        "Пожалуйста, проверьте, кто какие позиции ел, и подтвердите расчёт:"
+        f"{text('final_review_suffix')}"
+    )
+
+
+def render_final_details(session) -> str:
+    title = "Итог с чаевыми:" if has_any_tips(session) else "Итог без чаевых:"
+    allocations = build_session_allocations(session)
+    return (
+        f"{title}\n\n{render_review_assignments(session)}\n\n"
+        f"{render_allocations(allocations)}\n\n"
+        f"{render_payments_summary(session)}\n\n"
+        f"{render_settlement_summary(session, allocations)}"
     )
 
 
@@ -792,23 +825,23 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if session.awaiting_tip_segment_index is not None:
         tip_amount = parse_money_input(message_text)
         if tip_amount is None:
-            await update.message.reply_text("Не удалось распознать сумму чаевых. Пожалуйста, пришлите число, например: 500")
+            await update.message.reply_text("Не удалось распознать сумму чаевых. Пришлите число, например: 500")
             return
 
         segment_index = session.awaiting_tip_segment_index
         segment = session.receipt_segments[segment_index]
         segment.tip_amount = tip_amount
-        segment.tip_participants = []
+        segment.tip_participants = list(session.participants)
         segment.tip_payer_name = ""
         session.awaiting_tip_segment_index = None
         await update.message.reply_text(
             (
-                f"{format_segment_title(session, segment)}: чаевые сохранены {tip_amount:.2f} RUB\n"
+                f"{format_segment_title(session, segment)}: чаевые {tip_amount:.2f} RUB\n"
                 if format_segment_title(session, segment)
-                else f"Чаевые сохранены {tip_amount:.2f} RUB\n"
+                else f"Чаевые {tip_amount:.2f} RUB\n"
             )
-            + "Пожалуйста, выберите, как их распределить:",
-            reply_markup=build_tip_split_keyboard(segment_index, session.participants, segment.tip_participants),
+            + "Кто оплатил чаевые?",
+            reply_markup=build_payer_keyboard(f"tip_payer:{segment_index}", session.participants, segment.tip_payer_name),
         )
         return
 
@@ -817,7 +850,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def handle_feedback_input(update: Update, session, message_text: str) -> None:
     if not message_text:
-        await update.message.reply_text("Пожалуйста, пришлите обратную связь обычным текстовым сообщением:")
+        await update.message.reply_text(text("feedback_prompt"))
         return
 
     session.awaiting_feedback = False
@@ -831,17 +864,17 @@ async def handle_feedback_input(update: Update, session, message_text: str) -> N
                 full_name=user.full_name if user else "",
                 feedback_text=message_text,
             )
-            await update.message.reply_text("Спасибо! Сохранил вашу обратную связь, чтобы стать еще лучше :)")
+            await update.message.reply_text(text("feedback_saved"))
             return
 
         logging.warning("Feedback received, but Google Sheets is not configured.")
         await update.message.reply_text(
-            "Спасибо за вашу обратную связь!"
+            text("feedback_plain_saved")
         )
     except FeedbackStorageError as exc:
         logging.exception("Failed to store feedback: %s", exc)
         await update.message.reply_text(
-            "Спасибо за вашу обратную связь!"
+            text("feedback_plain_saved")
         )
 
 
@@ -862,7 +895,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     session = store.get(query.message.chat.id)
     if not session.receipt:
-        await query.edit_message_text("Сессия устарела. Пожалуйста, пришлите чек заново")
+        await query.edit_message_text(text("session_expired"))
         return
 
     if query.data.startswith("tips_"):
@@ -878,7 +911,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if query.data.startswith("final_"):
-        await handle_final_callback(query, session)
+        await handle_final_callback(query, session, context)
         return
 
     if query.data.startswith("feedback_"):
@@ -904,8 +937,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not item.participants:
             await query.edit_message_text(
                 render_item_prompt(item_index, item, "никто", len(session.receipt.items))
-                + "\n\nПожалуйста, сначала укажите, кто ел эту позицию:",
-                reply_markup=build_item_keyboard(item_index, session.participants, False),
+                + f"\n\n{text('item_select_required')}",
+                reply_markup=build_item_keyboard(item_index, session.participants),
             )
             return
 
@@ -920,7 +953,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         place_title = format_segment_prefix(session, previous_segment)
         await query.edit_message_text(
             place_title + render_item_prompt(previous_index, previous_item, previous_selected, len(session.receipt.items)),
-            reply_markup=build_item_keyboard(previous_index, session.participants, bool(previous_item.participants)),
+            reply_markup=build_item_keyboard(previous_index, session.participants, previous_item.participants),
         )
         return
 
@@ -929,7 +962,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     place_title = format_segment_prefix(session, segment)
     await query.edit_message_text(
         place_title + render_item_prompt(item_index, item, selected, len(session.receipt.items)),
-        reply_markup=build_item_keyboard(item_index, session.participants, bool(item.participants)),
+        reply_markup=build_item_keyboard(item_index, session.participants, item.participants),
     )
 
 
@@ -942,11 +975,11 @@ async def advance_after_item_selection(query, session, item_index: int) -> None:
         session.selecting_payer_segment_index = segment_index
         await query.edit_message_text(
             (
-                f"Позиции для {segment.title.lower()} распределены.\n"
+                text("positions_done_segment", segment=segment.title.lower()) + "\n"
                 if format_segment_title(session, segment)
-                else "Позиции распределены.\n"
+                else text("positions_done") + "\n"
             )
-            + f"Кто оплатил этот чек на {segment.total:.2f} RUB?",
+            + text("payer_question", amount=segment.total),
             reply_markup=build_payer_keyboard("payer", session.participants, segment.payer_name),
         )
         return
@@ -972,7 +1005,7 @@ async def advance_after_item_selection(query, session, item_index: int) -> None:
             next_selected,
             len(session.receipt.items),
         ),
-        reply_markup=build_item_keyboard(next_index, session.participants, bool(next_item.participants)),
+        reply_markup=build_item_keyboard(next_index, session.participants, next_item.participants),
     )
 
 
@@ -1002,63 +1035,11 @@ async def handle_tip_callback(query, session) -> None:
         await continue_after_segment_tip_decision(query, session, segment_index)
         return
 
-    if action == "tips_all":
-        segment.tip_participants = list(session.participants)
-        await query.edit_message_text(
-            (
-                f"{format_segment_title(session, segment)}: чаевые {segment.tip_amount:.2f} RUB\n"
-                if format_segment_title(session, segment)
-                else f"Чаевые {segment.tip_amount:.2f} RUB\n"
-            )
-            + "Кто оплатил чаевые?",
-            reply_markup=build_payer_keyboard(f"tip_payer:{segment_index}", session.participants, segment.tip_payer_name),
-        )
-        return
-
-    if action == "tips_toggle":
-        participant = rest[0]
-        if participant in segment.tip_participants:
-            segment.tip_participants.remove(participant)
-        else:
-            segment.tip_participants.append(participant)
-        await query.edit_message_text(
-            (
-                f"{format_segment_title(session, segment)}: чаевые {segment.tip_amount:.2f} RUB\n"
-                if format_segment_title(session, segment)
-                else f"Чаевые {segment.tip_amount:.2f} RUB\n"
-            )
-            + "Пожалуйста, выберите участников для чаевых.",
-            reply_markup=build_tip_split_keyboard(segment_index, session.participants, segment.tip_participants),
-        )
-        return
-
-    if action == "tips_done":
-        if not segment.tip_participants:
-            await query.edit_message_text(
-                "Пожалуйста, сначала выберите хотя бы одного участника для чаевых.\n"
-                + (
-                    f"{format_segment_title(session, segment)}: чаевые {segment.tip_amount:.2f} RUB"
-                    if format_segment_title(session, segment)
-                    else f"Чаевые {segment.tip_amount:.2f} RUB"
-                ),
-                reply_markup=build_tip_split_keyboard(segment_index, session.participants, segment.tip_participants),
-            )
-            return
-        await query.edit_message_text(
-            (
-                f"{format_segment_title(session, segment)}: чаевые {segment.tip_amount:.2f} RUB\n"
-                if format_segment_title(session, segment)
-                else f"Чаевые {segment.tip_amount:.2f} RUB\n"
-            )
-            + "Кто оплатил чаевые?",
-            reply_markup=build_payer_keyboard(f"tip_payer:{segment_index}", session.participants, segment.tip_payer_name),
-        )
-        return
 
 
 async def handle_receipt_payer_callback(query, session, context) -> None:
     if session.selecting_payer_segment_index is None:
-        await query.edit_message_text("Не удалось определить чек для выбора плательщика. Пожалуйста, начните заново через /reset")
+        await query.edit_message_text("Не удалось определить чек для выбора плательщика. Начните заново через /reset")
         return
 
     payer_name = query.data.split(":", 1)[1]
@@ -1107,50 +1088,47 @@ async def continue_after_segment_tip_decision(query, session, segment_index: int
             next_selected,
             len(session.receipt.items),
         ),
-        reply_markup=build_item_keyboard(next_index, session.participants),
+        reply_markup=build_item_keyboard(next_index, session.participants, next_item.participants),
     )
 
 
-async def handle_final_callback(query, session) -> None:
+async def handle_final_callback(query, session, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if query.data == "final_details":
+        await query.edit_message_text(render_final_details(session))
+        return
+
     if query.data == "final_confirm":
-        tips_title = "Итог с чаевыми:" if has_any_tips(session) else "Итог без чаевых:"
         allocations = build_session_allocations(session)
         confirmation_text = (
-            f"{tips_title}\n\n{render_review_assignments(session)}\n\n"
-            f"{render_allocations(allocations)}\n\n"
-            f"{render_payments_summary(session)}\n\n"
             f"{render_settlement_summary(session, allocations)}\n\n"
-            "Расчёт подтверждён. Чтобы разделить новые чеки, просто пришлите их фото"
+            f"{text('new_receipt_hint')}"
         )
         session.is_finalized = True
         session.successful_calculation_count += 1
-        await query.edit_message_text(confirmation_text)
-        if feedback_storage_enabled():
-            try:
-                user = query.from_user
-                already_left_feedback = has_feedback_for_user(
-                    user_id=user.id if user else None,
-                    chat_id=query.message.chat.id,
-                )
-            except FeedbackStorageError as exc:
-                logging.exception("Failed to check feedback history: %s", exc)
-                already_left_feedback = True
-
-            if (
-                not already_left_feedback
-                and session.successful_calculation_count in FEEDBACK_PROMPT_CALCULATION_COUNTS
-            ):
-                await query.message.reply_text(
-                    "Хотите оставить обратную связь?",
-                    reply_markup=build_feedback_offer_keyboard(),
-                )
+        session.feedback_offer_generation += 1
+        await query.edit_message_text(
+            f"{text('final_ready')}\n\n{confirmation_text}",
+            reply_markup=build_final_details_keyboard(),
+        )
+        if (
+            feedback_storage_enabled()
+            and session.successful_calculation_count in FEEDBACK_PROMPT_CALCULATION_COUNTS
+        ):
+            user = query.from_user
+            schedule_feedback_offer(
+                context.application,
+                query.message.chat.id,
+                user.id if user else None,
+                session.feedback_offer_generation,
+            )
         return
 
     if query.data == "final_recalculate":
+        session.feedback_offer_generation += 1
         restart_allocation(session)
         if session.selected_item_index is None or session.selected_item_index >= len(session.receipt.items):
             await query.edit_message_text(
-                "Не удалось запустить пересчёт. Пожалуйста, отправьте фотографию чека ещё раз."
+                text("recalculate_failed")
             )
             return
 
@@ -1173,13 +1151,13 @@ async def handle_feedback_callback(query, session) -> None:
     if query.data == "feedback_yes":
         session.awaiting_feedback = True
         await query.edit_message_text(
-            "Напишите, пожалуйста, обратную связь одним сообщением (фото пока приложить нельзя):"
+            text("feedback_prompt")
         )
         return
 
     if query.data == "feedback_later":
         session.awaiting_feedback = False
-        await query.edit_message_text("Хорошо, в другой раз")
+        await query.edit_message_text(text("feedback_later"))
         return
 
 
@@ -1188,7 +1166,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     if isinstance(update, Update) and update.effective_chat:
         try:
             await update.effective_chat.send_message(
-                "Произошла внутренняя ошибка. Пожалуйста, повторите действие ещё раз. Если проблема сохранится, отправьте фотографию чека заново"
+                text("internal_error")
             )
         except Exception:
             logging.exception("Failed to notify user about handler error")

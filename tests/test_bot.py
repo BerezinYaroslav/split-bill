@@ -100,19 +100,23 @@ def test_album_summary_forces_first_place_label():
         force_segment_title=True,
     )
 
-    assert summary.startswith("Место 1 распознано:\n\n")
+    assert summary.startswith("Место 1\nГотово! Вот что я нашёл 👇\n\n")
+    assert summary.endswith("Всё выглядит верно?")
 
 
 def test_item_keyboard_shows_next_only_after_selection():
-    keyboard_without_selection = build_item_keyboard(0, ["Ярослав", "Лера"], False)
+    keyboard_without_selection = build_item_keyboard(0, ["Ярослав", "Лера"])
     texts_without_selection = [button.text for row in keyboard_without_selection.inline_keyboard for button in row]
-    keyboard_with_selection = build_item_keyboard(0, ["Ярослав", "Лера"], True)
+    keyboard_with_selection = build_item_keyboard(0, ["Ярослав", "Лера"], ["Ярослав"])
     texts_with_selection = [button.text for row in keyboard_with_selection.inline_keyboard for button in row]
 
     assert "Дальше" not in texts_without_selection
     assert "Дальше" in texts_with_selection
     assert "Готово" not in texts_with_selection
-    assert "Пожалуйста, выберите участников для этой позиции:" in render_item_prompt(
+    assert "✓ Ярослав" in texts_with_selection
+    assert "Лера" in texts_with_selection
+    assert "✓ Лера" not in texts_with_selection
+    assert "Выберите участников для этой позиции:" in render_item_prompt(
         0,
         build_receipt("Бургер", "100", "Ярослав").items[0],
         "Ярослав",
@@ -165,11 +169,40 @@ def test_set_people_rejects_single_participant():
 
     assert update.message.reply_calls == [
         (
-            "Пожалуйста, укажите минимум двух участников и разделите их запятой: Ярослав, Лера",
+            "Напишите минимум двух участников через запятую",
             None,
         )
     ]
     assert store.get(update.effective_chat.id).participants == []
+
+
+def test_set_people_rejects_space_separated_participants():
+    update = FakeUpdate("Ярослав Лера")
+    store.reset(update.effective_chat.id)
+
+    asyncio.run(set_people(update, None))
+
+    assert update.message.reply_calls == [
+        (
+            "Напишите минимум двух участников через запятую",
+            None,
+        )
+    ]
+    assert store.get(update.effective_chat.id).participants == []
+
+
+class FakeApplication:
+    def __init__(self):
+        self.scheduled = []
+
+    def create_task(self, coro):
+        self.scheduled.append(coro)
+        coro.close()
+
+
+class FakeContext:
+    def __init__(self):
+        self.application = FakeApplication()
 
 
 class FakeQuery:
@@ -190,45 +223,57 @@ def build_finalized_session() -> SessionState:
     return session
 
 
-def test_handle_final_callback_asks_feedback_on_first_success(monkeypatch):
+def test_handle_final_callback_schedules_feedback_offer_on_first_success(monkeypatch):
     monkeypatch.setattr("paytogether.bot.feedback_storage_enabled", lambda: True)
-    monkeypatch.setattr("paytogether.bot.has_feedback_for_user", lambda **_kwargs: False)
+    scheduled_calls = []
+    monkeypatch.setattr("paytogether.bot.schedule_feedback_offer", lambda *args: scheduled_calls.append(args))
 
     session = build_finalized_session()
     query = FakeQuery()
+    context = FakeContext()
 
-    asyncio.run(handle_final_callback(query, session))
+    asyncio.run(handle_final_callback(query, session, context))
 
     assert session.successful_calculation_count == 1
-    assert len(query.message.reply_calls) == 1
-    assert query.message.reply_calls[0][0] == "Хотите оставить обратную связь?"
+    assert len(scheduled_calls) == 1
+    assert scheduled_calls[0][1] == query.message.chat.id
+    assert query.edited_text[0].startswith("Готово! Вот итог расчётов 👇")
+    assert "Бургер" not in query.edited_text[0]
+    buttons = [button.text for row in query.edited_text[1].inline_keyboard for button in row]
+    assert buttons == ["Показать детали"]
 
 
 def test_handle_final_callback_skips_feedback_on_second_success(monkeypatch):
     monkeypatch.setattr("paytogether.bot.feedback_storage_enabled", lambda: True)
-    monkeypatch.setattr("paytogether.bot.has_feedback_for_user", lambda **_kwargs: False)
+    scheduled_calls = []
+    monkeypatch.setattr("paytogether.bot.schedule_feedback_offer", lambda *args: scheduled_calls.append(args))
 
     session = build_finalized_session()
     session.successful_calculation_count = 1
     query = FakeQuery()
+    context = FakeContext()
 
-    asyncio.run(handle_final_callback(query, session))
+    asyncio.run(handle_final_callback(query, session, context))
 
     assert session.successful_calculation_count == 2
-    assert query.message.reply_calls == []
+    assert scheduled_calls == []
 
 
-def test_handle_final_callback_skips_feedback_when_feedback_exists(monkeypatch):
+def test_handle_final_callback_recalculate_increments_generation(monkeypatch):
     monkeypatch.setattr("paytogether.bot.feedback_storage_enabled", lambda: True)
-    monkeypatch.setattr("paytogether.bot.has_feedback_for_user", lambda **_kwargs: True)
+    scheduled_calls = []
+    monkeypatch.setattr("paytogether.bot.schedule_feedback_offer", lambda *args: scheduled_calls.append(args))
 
     session = build_finalized_session()
-    query = FakeQuery()
+    session.successful_calculation_count = 1
+    prev_generation = session.feedback_offer_generation
+    query = FakeQuery(data="final_recalculate")
+    context = FakeContext()
 
-    asyncio.run(handle_final_callback(query, session))
+    asyncio.run(handle_final_callback(query, session, context))
 
-    assert session.successful_calculation_count == 1
-    assert query.message.reply_calls == []
+    assert session.feedback_offer_generation == prev_generation + 1
+    assert scheduled_calls == []
 
 
 def test_normalize_receipt_totals_spreads_missing_discount_across_discounted_items():

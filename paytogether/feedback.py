@@ -48,14 +48,13 @@ def append_feedback_row(
 
     worksheet = _open_worksheet(spreadsheet_id, worksheet_name)
     _ensure_feedback_headers(worksheet)
-    _upsert_feedback_row(
+    _append_feedback_row(
         worksheet=worksheet,
         chat_id=chat_id,
         user_id=user_id,
         username=username,
         full_name=full_name,
         feedback_text=feedback_text,
-        overwrite_feedback_text=True,
     )
 
 
@@ -73,14 +72,13 @@ def ensure_feedback_user_row(
 
     worksheet = _open_worksheet(spreadsheet_id, worksheet_name)
     _ensure_feedback_headers(worksheet)
-    _upsert_feedback_row(
+    _append_feedback_row(
         worksheet=worksheet,
         chat_id=chat_id,
         user_id=user_id,
         username=username,
         full_name=full_name,
         feedback_text="",
-        overwrite_feedback_text=False,
     )
 
 
@@ -91,13 +89,35 @@ def has_feedback_for_user(*, user_id: int | None, chat_id: int) -> bool:
         return False
 
     worksheet = _open_worksheet(spreadsheet_id, worksheet_name)
-    row_index = _find_feedback_row_index(worksheet=worksheet, user_id=user_id, chat_id=chat_id)
-    if row_index is None:
+    try:
+        rows = worksheet.get_all_values()
+    except Exception as exc:
+        raise FeedbackStorageError("Не удалось прочитать строки из Google Sheets.") from exc
+
+    if len(rows) < 2:
         return False
 
-    row = _get_row_values(worksheet, row_index)
-    headers = _get_headers(worksheet)
-    return bool(_extract_feedback_text(row=row, headers=headers).strip())
+    headers = rows[0]
+    header_index = {header: index for index, header in enumerate(headers)}
+    user_id_col = header_index.get("user_id")
+    chat_id_col = header_index.get("chat_id")
+    feedback_col = header_index.get("feedback_text")
+
+    if feedback_col is None:
+        return False
+
+    target_user_id = str(user_id) if user_id is not None else ""
+    target_chat_id = str(chat_id)
+
+    for row in rows[1:]:
+        record_user_id = row[user_id_col].strip() if user_id_col is not None and user_id_col < len(row) else ""
+        record_chat_id = row[chat_id_col].strip() if chat_id_col is not None and chat_id_col < len(row) else ""
+        matches = (target_user_id and record_user_id == target_user_id) or (
+            not target_user_id and record_chat_id == target_chat_id
+        )
+        if matches and feedback_col < len(row) and row[feedback_col].strip():
+            return True
+    return False
 
 
 def _ensure_feedback_headers(worksheet) -> None:
@@ -115,7 +135,7 @@ def _ensure_feedback_headers(worksheet) -> None:
         raise FeedbackStorageError("Не удалось обновить заголовки Google Sheets.") from exc
 
 
-def _upsert_feedback_row(
+def _append_feedback_row(
     *,
     worksheet,
     chat_id: int,
@@ -123,81 +143,20 @@ def _upsert_feedback_row(
     username: str,
     full_name: str,
     feedback_text: str,
-    overwrite_feedback_text: bool,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    row_index = _find_feedback_row_index(worksheet=worksheet, user_id=user_id, chat_id=chat_id)
-    existing_feedback_text = ""
-    if row_index is not None:
-        existing_row = _get_row_values(worksheet, row_index)
-        existing_feedback_text = _extract_feedback_text(row=existing_row, headers=_get_headers(worksheet))
-
     row: list[Any] = [
         now,
         str(chat_id),
         str(user_id or ""),
         username,
         full_name,
-        feedback_text if overwrite_feedback_text else existing_feedback_text,
+        feedback_text,
     ]
-
-    if row_index is None:
+    try:
         worksheet.append_row(row, value_input_option="USER_ENTERED")
-        return
-
-    worksheet.update(
-        f"A{row_index}:F{row_index}",
-        [row],
-        value_input_option="USER_ENTERED",
-    )
-
-
-def _find_feedback_row_index(*, worksheet, user_id: int | None, chat_id: int) -> int | None:
-    target_user_id = str(user_id) if user_id is not None else ""
-    target_chat_id = str(chat_id)
-
-    try:
-        rows = worksheet.get_all_values()
     except Exception as exc:
-        raise FeedbackStorageError("Не удалось прочитать строки из Google Sheets.") from exc
-
-    if not rows:
-        return None
-
-    headers = rows[0]
-    header_index = {header: index for index, header in enumerate(headers)}
-    user_id_index = header_index.get("user_id")
-    chat_id_index = header_index.get("chat_id")
-
-    for row_index, row in enumerate(rows[1:], start=2):
-        record_user_id = row[user_id_index].strip() if user_id_index is not None and user_id_index < len(row) else ""
-        record_chat_id = row[chat_id_index].strip() if chat_id_index is not None and chat_id_index < len(row) else ""
-        if target_user_id and record_user_id == target_user_id:
-            return row_index
-        if not target_user_id and record_chat_id == target_chat_id:
-            return row_index
-    return None
-
-
-def _get_row_values(worksheet, row_index: int) -> list[str]:
-    try:
-        return worksheet.row_values(row_index)
-    except Exception as exc:
-        raise FeedbackStorageError("Не удалось прочитать строку из Google Sheets.") from exc
-
-
-def _get_headers(worksheet) -> list[str]:
-    return _get_row_values(worksheet, 1)
-
-
-def _extract_feedback_text(*, row: list[str], headers: list[str]) -> str:
-    try:
-        feedback_text_index = headers.index("feedback_text")
-    except ValueError:
-        return ""
-    if feedback_text_index >= len(row):
-        return ""
-    return row[feedback_text_index]
+        raise FeedbackStorageError("Не удалось добавить строку в Google Sheets.") from exc
 
 
 def _open_worksheet(spreadsheet_id: str, worksheet_name: str):

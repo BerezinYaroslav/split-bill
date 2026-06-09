@@ -100,14 +100,14 @@ def test_append_feedback_row_appends_new_row_with_updated_schema(monkeypatch):
     ]
 
 
-def test_append_feedback_row_updates_existing_row_for_same_user(monkeypatch):
+def test_append_feedback_row_always_appends_new_row_for_existing_user(monkeypatch):
     class FakeWorksheet:
         def __init__(self):
             self.rows = [
                 FEEDBACK_HEADERS,
                 ["2026-01-01T00:00:00+00:00", "123", "456", "old", "Old User", "Старый отзыв"],
             ]
-            self.updated_rows = []
+            self.appended_rows = []
 
         def row_values(self, row_index):
             return self.rows[row_index - 1] if row_index <= len(self.rows) else []
@@ -115,14 +115,12 @@ def test_append_feedback_row_updates_existing_row_for_same_user(monkeypatch):
         def update(self, cell_range, values, value_input_option="RAW"):
             if cell_range == "A1:F1":
                 self.rows[0] = values[0]
-                return
-            self.updated_rows.append((cell_range, values[0]))
 
         def get_all_values(self):
             return self.rows
 
         def append_row(self, row, value_input_option="RAW"):
-            raise AssertionError("append_row should not be called for existing feedback")
+            self.appended_rows.append(row)
 
     worksheet = FakeWorksheet()
     monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "sheet-id")
@@ -137,9 +135,8 @@ def test_append_feedback_row_updates_existing_row_for_same_user(monkeypatch):
         feedback_text="Новый отзыв",
     )
 
-    assert len(worksheet.updated_rows) == 1
-    assert worksheet.updated_rows[0][0] == "A2:F2"
-    assert worksheet.updated_rows[0][1][1:] == [
+    assert len(worksheet.appended_rows) == 1
+    assert worksheet.appended_rows[0][1:] == [
         "123",
         "456",
         "tester",
@@ -148,14 +145,14 @@ def test_append_feedback_row_updates_existing_row_for_same_user(monkeypatch):
     ]
 
 
-def test_ensure_feedback_user_row_preserves_existing_feedback_text(monkeypatch):
+def test_ensure_feedback_user_row_always_appends_new_row(monkeypatch):
     class FakeWorksheet:
         def __init__(self):
             self.rows = [
                 FEEDBACK_HEADERS,
                 ["2026-01-01T00:00:00+00:00", "123", "456", "old", "Old User", "Старый отзыв"],
             ]
-            self.updated_rows = []
+            self.appended_rows = []
 
         def row_values(self, row_index):
             return self.rows[row_index - 1] if row_index <= len(self.rows) else []
@@ -163,14 +160,12 @@ def test_ensure_feedback_user_row_preserves_existing_feedback_text(monkeypatch):
         def update(self, cell_range, values, value_input_option="RAW"):
             if cell_range == "A1:F1":
                 self.rows[0] = values[0]
-                return
-            self.updated_rows.append((cell_range, values[0]))
 
         def get_all_values(self):
             return self.rows
 
         def append_row(self, row, value_input_option="RAW"):
-            raise AssertionError("append_row should not be called for existing user")
+            self.appended_rows.append(row)
 
     worksheet = FakeWorksheet()
     monkeypatch.setenv("GOOGLE_SHEETS_SPREADSHEET_ID", "sheet-id")
@@ -184,12 +179,11 @@ def test_ensure_feedback_user_row_preserves_existing_feedback_text(monkeypatch):
         full_name="New Name",
     )
 
-    assert len(worksheet.updated_rows) == 1
-    assert worksheet.updated_rows[0][0] == "A2:F2"
-    assert worksheet.updated_rows[0][1][1:] == [
+    assert len(worksheet.appended_rows) == 1
+    assert worksheet.appended_rows[0][1:] == [
         "123",
         "456",
         "new_username",
         "New Name",
-        "Старый отзыв",
+        "",
     ]

@@ -34,6 +34,7 @@ class SessionState:
     awaiting_feedback: bool = False
     selecting_payer_segment_index: int | None = None
     successful_calculation_count: int = 0
+    feedback_offer_generation: int = 0
 
 
 class SessionStore:
